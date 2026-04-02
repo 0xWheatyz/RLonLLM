@@ -1,0 +1,12 @@
+[tasks.build]
+description = "Build the Docker image"
+run = "docker build -t ollama-qwen ."
+
+[tasks.run]
+description = "Run the Docker container"
+depends = "build"
+run = "docker run --rm -it -p 11434:11434 ollama-qwen"
+
+[tasks.docker]
+description = "Run the whole stack"
+run = "docker compose run --build --rm rl-trainer python3 main.py"
