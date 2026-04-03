@@ -26,5 +26,22 @@ services:
     volumes:
       - ./results:/app/results
 
+  grpo-trainer:
+    build:
+      context: .
+      dockerfile: RL/Dockerfile
+    environment:
+      - MODEL_NAME=qwen-1.5b
+      - RESULTS_DIR=/app/results
+    volumes:
+      - ./results:/app/results
+      - huggingface_cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          memory: 48G
+    command: ["python", "grpo_train.py", "--model", "${MODEL_NAME:-qwen-1.5b}"]
+
 volumes:
   ollama_data:
+  huggingface_cache:
