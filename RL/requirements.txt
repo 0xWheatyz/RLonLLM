@@ -1,3 +1,9 @@
 numpy
 requests
 astunparse
+torch>=2.1.0
+transformers>=4.40.0
+peft>=0.13.0
+accelerate>=0.30.0
+pandas
+matplotlib
