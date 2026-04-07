@@ -224,10 +224,10 @@ def load_models(model_key: str):
     )
     base_model.to(device)
     lora_cfg = LoraConfig(
-        r=GRPO_CONFIG["lora_r"],
+        r=GRPO_CONFIG["lora_rank"],
         lora_alpha=GRPO_CONFIG["lora_alpha"],
         lora_dropout=GRPO_CONFIG["lora_dropout"],
-        target_modules=model_cfg.get("lora_targets", ["q_proj", "v_proj"]),
+        target_modules=model_cfg.get("lora_target_modules", ["q_proj", "v_proj"]),
         bias="none",
         task_type="CAUSAL_LM",
     )
