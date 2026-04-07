@@ -456,7 +456,10 @@ def train(args: argparse.Namespace) -> None:
             })
 
         # Compute normalized rewards via reward.py
-        normalized_rewards = compute_rewards(group_scores)
+        group_texts = [c["text"] if c else "" for c in group_completions]
+        normalized_rewards = compute_rewards(
+            group_codes, group_scores, group_texts, branch_manager, best_score,
+        )
 
         # GRPO policy gradient update (only on completions that generated tokens)
         valid_comps = []
