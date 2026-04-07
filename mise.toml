@@ -1,16 +1,3 @@
-[tasks.build]
-description = "Build the Docker image"
-run = "docker build -t ollama-qwen ."
-
-[tasks.run]
-description = "Run the Docker container"
-depends = "build"
-run = "docker run --rm -it -p 11434:11434 ollama-qwen"
-
-[tasks.docker]
-description = "Run the prompt-guided baseline"
-run = "docker compose run --build --rm rl-trainer python3 main.py"
-
 [tasks.grpo-qwen]
 description = "GRPO training — Qwen2.5-Coder-1.5B"
 run = "cd RL && python grpo_train.py --model qwen-1.5b"
@@ -34,10 +21,6 @@ python grpo_train.py --model deepseek-1.3b
 [tasks.compare]
 description = "Compare all model results"
 run = "python visualize_results.py --compare"
-
-[tasks.autoresearch]
-description = "Launch Junie autoresearch loop (requires Ollama running)"
-run = "./autoresearch/run.sh 50"
 
 [tasks.prefetch]
 description = "Pre-download HuggingFace models (run Friday night)"
