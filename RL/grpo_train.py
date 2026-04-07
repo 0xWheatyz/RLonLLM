@@ -103,11 +103,19 @@ if __name__ == "__main__":
         print("FAILED")
 """
     try:
+        import resource
+        def _limit_resources():
+            # 512MB virtual memory limit
+            resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024, 512 * 1024 * 1024))
+            # No subprocess spawning (prevents fork bombs)
+            resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))
+
         res = subprocess.run(
             [sys.executable, "-c", test_script],
             capture_output=True,
             text=True,
             timeout=10,
+            preexec_fn=_limit_resources,
         )
         if res.returncode != 0:
             print(f"  [eval] exit {res.returncode}: {res.stderr.strip()}")
@@ -239,7 +247,7 @@ def load_models(model_key: str):
         policy_model.gradient_checkpointing_enable()
         print("  Gradient checkpointing: enabled")
 
-    print(f"  Trainable params: {policy_model.print_trainable_parameters()}")
+    policy_model.print_trainable_parameters()
 
     # --- Reference model (frozen, no LoRA) ---
     ref_model = AutoModelForCausalLM.from_pretrained(
@@ -322,7 +330,9 @@ def grpo_update(
         device = next(policy_model.parameters()).device
 
     policy_model.train()
-    total_loss = torch.tensor(0.0, device=device)
+    optimizer.zero_grad()
+    total_loss_value = 0.0
+    n_valid = 0
 
     for comp, reward in zip(completions_data, normalized_rewards):
         input_ids = comp["input_ids"].to(device)
@@ -350,19 +360,17 @@ def grpo_update(
         kl = policy_lp - ref_lp
 
         # GRPO loss: -reward * policy_log_prob + kl_coeff * KL
-        sample_loss = -reward * policy_lp + kl_coeff * kl
-        total_loss = total_loss + sample_loss
+        # Divide by total count now so gradients accumulate correctly
+        sample_loss = (-reward * policy_lp + kl_coeff * kl) / len(completions_data)
+        sample_loss.backward()
+        total_loss_value += sample_loss.item()
+        n_valid += 1
 
-    n = len(completions_data)
-    if n > 0:
-        total_loss = total_loss / n
+    if n_valid > 0:
+        torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
+        optimizer.step()
 
-    optimizer.zero_grad()
-    total_loss.backward()
-    torch.nn.utils.clip_grad_norm_(policy_model.parameters(), max_norm=1.0)
-    optimizer.step()
-
-    return total_loss.item()
+    return total_loss_value
 
 
 # ---------------------------------------------------------------------------
@@ -390,10 +398,6 @@ def train(args: argparse.Namespace) -> None:
     os.makedirs(results_dir, exist_ok=True)
     log_path = os.path.join(results_dir, "training_log.jsonl")
 
-    # Clear log
-    with open(log_path, "w") as f:
-        pass
-
     branch_manager = BranchManager(
         exploit_threshold=0.75,
         reward_delta_threshold=0.02,
@@ -402,18 +406,46 @@ def train(args: argparse.Namespace) -> None:
 
     best_score = float("inf")
     best_code = ""
+    start_iteration = 1
+
+    # Resume from previous run if log exists and --resume is set
+    if args.resume and os.path.exists(log_path):
+        with open(log_path, "r") as f:
+            for line in f:
+                entry = json.loads(line)
+                start_iteration = max(start_iteration, entry["iteration"] + 1)
+                if entry["score"] < best_score:
+                    best_score = entry["score"]
+                    best_code = entry.get("code", "")
+                # Replay into branch_manager so exploitation state is restored
+                branch_manager.record(entry.get("code", ""), entry["score"])
+        print(f"Resuming from iteration {start_iteration} (best so far: {best_score:.2f}ms)")
+        # Load the latest checkpoint into the policy model
+        last_ckpt = os.path.join(results_dir, f"checkpoint-{start_iteration - 1}")
+        if os.path.isdir(last_ckpt):
+            from peft import PeftModel
+            policy_model = PeftModel.from_pretrained(
+                policy_model.base_model.model, last_ckpt
+            ).to(device)
+            policy_model.train()
+            print(f"  Loaded checkpoint: {last_ckpt}")
+    else:
+        # Fresh run — clear log
+        with open(log_path, "w") as f:
+            pass
+
     temperature = GRPO_CONFIG.get("temperature", 0.7)
     max_new_tokens = GRPO_CONFIG.get("max_new_tokens", 1024)
     kl_coeff = GRPO_CONFIG.get("kl_coeff", 0.05)
 
     print(f"\n{'='*60}")
     print(f"GRPO Training: {args.model}")
-    print(f"Iterations: {args.iterations}  |  Group size: {args.group_size}")
+    print(f"Iterations: {start_iteration}-{args.iterations}  |  Group size: {args.group_size}")
     print(f"Temperature: {temperature}  |  KL coeff: {kl_coeff}")
     print(f"Results: {results_dir}")
     print(f"{'='*60}\n")
 
-    for iteration in range(1, args.iterations + 1):
+    for iteration in range(start_iteration, args.iterations + 1):
         print(f"\n--- Iteration {iteration}/{args.iterations} ---")
 
         # Build prompt with approach history
@@ -576,6 +608,10 @@ def main():
     parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed for reproducibility (default: 42)",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume from last checkpoint instead of starting fresh",
     )
     args = parser.parse_args()
     train(args)
