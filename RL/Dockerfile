@@ -26,6 +26,13 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # Copy the RL source code
 COPY RL/*.py .
 
+# Pre-download default model weights during build so GPU time isn't wasted
+# on network I/O at runtime. Cache lives in the image layer.
+ARG PREFETCH_MODEL="Qwen/Qwen2.5-Coder-1.5B-Instruct"
+RUN python -c "from transformers import AutoModelForCausalLM, AutoTokenizer; \
+    AutoTokenizer.from_pretrained('${PREFETCH_MODEL}', trust_remote_code=True); \
+    AutoModelForCausalLM.from_pretrained('${PREFETCH_MODEL}', trust_remote_code=True)"
+
 # Create results directory
 RUN mkdir -p /app/results && chmod 777 /app/results
 
