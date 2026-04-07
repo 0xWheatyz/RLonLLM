@@ -175,7 +175,7 @@ def compute_log_probs(model, input_ids: torch.Tensor, completion_start: int, dev
     input_ids = input_ids.to(device)
 
     with torch.no_grad():
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=device.type == "cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             outputs = model(input_ids)
     # logits shape: (1, seq_len, vocab_size)
     logits = outputs.logits
@@ -333,7 +333,7 @@ def grpo_update(
             continue
 
         # Policy log-probs (need gradients here)
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=device.type == "cuda"):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
             outputs = policy_model(input_ids)
         logits = outputs.logits
         log_probs = torch.log_softmax(logits, dim=-1)
