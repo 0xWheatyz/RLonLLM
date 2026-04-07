@@ -17,6 +17,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/0xWheatyz/RLonLLM.git"
+BRANCH="gpu-droplet-deploy"
 DEPLOY_DIR="/opt/RLonLLM"
 
 echo "=== RLonLLM GPU Deployment ==="
@@ -99,10 +100,12 @@ echo "[4/5] Setting up repository at ${DEPLOY_DIR}..."
 
 if [ -d "${DEPLOY_DIR}/.git" ]; then
     echo "Repo exists. Pulling latest changes..."
+    git -C "${DEPLOY_DIR}" fetch origin
+    git -C "${DEPLOY_DIR}" checkout "${BRANCH}"
     git -C "${DEPLOY_DIR}" pull --ff-only
 else
     echo "Cloning repository..."
-    git clone "${REPO_URL}" "${DEPLOY_DIR}"
+    git clone -b "${BRANCH}" "${REPO_URL}" "${DEPLOY_DIR}"
 fi
 
 cd "${DEPLOY_DIR}"
@@ -120,6 +123,17 @@ docker compose up -d
 
 echo ""
 echo "=== Deployment complete ==="
-echo "Container is running. Tailing logs (Ctrl+C to stop)..."
+echo ""
+
+# Wait for training to finish, then shut down the droplet to stop billing.
+# Use --follow --no-log-prefix so output streams cleanly to the terminal.
+echo "Waiting for training to complete (droplet will auto-shutdown after)..."
+echo "Press Ctrl+C to detach WITHOUT cancelling the shutdown."
 echo ""
 docker compose logs -f
+
+echo ""
+echo "Training container exited. Shutting down droplet in 60s to stop billing..."
+echo "(Press Ctrl+C to cancel shutdown)"
+sleep 60
+shutdown -h now
