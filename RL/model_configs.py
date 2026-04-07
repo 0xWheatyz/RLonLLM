@@ -37,7 +37,9 @@ GRPO_CONFIG = {
     "kl_coeff": 0.05,          # KL penalty against frozen reference policy
     "num_iterations": 30,
     "temperature": 0.7,
-    "dtype": "float32",        # CPU — no bf16 guarantee
+    "dtype": "bfloat16",        # GPU — efficient on A100/H100, supported on A10
+    "device": "cuda",
+    "gradient_checkpointing": True,  # save VRAM for smaller GPUs (e.g. A10 24GB)
 }
 
 ALL_MODELS = {**MODELS, **STRETCH_MODELS}
