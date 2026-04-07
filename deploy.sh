@@ -115,11 +115,15 @@ mkdir -p results
 # 5. Build and run with docker compose
 # ---------------------------------------------------------------
 echo ""
-echo "[5/5] Building and starting GRPO trainer..."
+echo "[5/5] Pulling image and starting GRPO trainer..."
+
+# Pull prebuilt image from GHCR (built by CI on every push)
+GHCR_IMAGE="ghcr.io/0xwheatyz/rlonllm:${BRANCH}"
+echo "Pulling ${GHCR_IMAGE} ..."
+docker pull "${GHCR_IMAGE}"
 
 docker compose down --remove-orphans 2>/dev/null || true
-docker compose build --no-cache
-docker compose up -d
+GRPO_IMAGE="${GHCR_IMAGE}" docker compose up -d
 
 echo ""
 echo "=== Deployment complete ==="

@@ -1,5 +1,6 @@
 services:
   grpo-trainer:
+    image: ${GRPO_IMAGE:-ghcr.io/0xwheatyz/rlonllm:gpu-droplet-deploy}
     build:
       context: .
       dockerfile: RL/Dockerfile
