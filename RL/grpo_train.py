@@ -2,7 +2,8 @@
 GRPO Training Script for find_primes RL
 ========================================
 Manual GRPO loop (no trl.GRPOTrainer) — avoids hidden CUDA assumptions.
-Trains LoRA adapters on CPU using HuggingFace transformers + peft.
+Trains LoRA adapters using HuggingFace transformers + peft.
+Supports GPU (CUDA) with automatic fallback to CPU.
 
 Usage:
     python grpo_train.py --model qwen-1.5b
@@ -35,6 +36,12 @@ from reward import compute_rewards
 # ---------------------------------------------------------------------------
 
 TARGET_N = 10**6
+
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "bfloat16": torch.bfloat16,
+    "float16": torch.float16,
+}
 RESULTS_BASE = os.path.join(os.path.dirname(__file__), "results")
 
 SYSTEM_PROMPT = (
@@ -149,7 +156,7 @@ def set_seeds(seed: int) -> None:
 # Log-probability computation
 # ---------------------------------------------------------------------------
 
-def compute_log_probs(model, input_ids: torch.Tensor, completion_start: int) -> torch.Tensor:
+def compute_log_probs(model, input_ids: torch.Tensor, completion_start: int, device: torch.device = None) -> torch.Tensor:
     """
     Compute the sum of per-token log-probabilities for the *completion* portion
     of `input_ids`.
@@ -158,12 +165,18 @@ def compute_log_probs(model, input_ids: torch.Tensor, completion_start: int) -> 
         model: the language model (policy or reference).
         input_ids: (1, seq_len) token ids for prompt + completion.
         completion_start: index where the completion tokens begin.
+        device: target device for tensors.
 
     Returns:
         Scalar tensor — sum of log-probs over the completion tokens.
     """
+    if device is None:
+        device = next(model.parameters()).device
+    input_ids = input_ids.to(device)
+
     with torch.no_grad():
-        outputs = model(input_ids)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            outputs = model(input_ids)
     # logits shape: (1, seq_len, vocab_size)
     logits = outputs.logits
     log_probs = torch.log_softmax(logits, dim=-1)
@@ -186,25 +199,30 @@ def compute_log_probs(model, input_ids: torch.Tensor, completion_start: int) -> 
 def load_models(model_key: str):
     """
     Load the tokenizer, a LoRA-wrapped policy model, and a frozen reference
-    model.  All in float32 on CPU.
+    model.  Uses dtype from GRPO_CONFIG and moves models to GPU if available.
 
     Returns:
-        (tokenizer, policy_model, ref_model, model_config)
+        (tokenizer, policy_model, ref_model, model_config, device)
     """
-    model_cfg = MODELS[model_key]
-    hf_name = model_cfg["hf_name"]
-    print(f"Loading {hf_name} ...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model_dtype = DTYPE_MAP.get(GRPO_CONFIG.get("dtype", "float32"), torch.float32)
 
-    tokenizer = AutoTokenizer.from_pretrained(hf_name, trust_remote_code=True)
+    model_cfg = MODELS[model_key]
+    hf_id = model_cfg["hf_id"]
+    print(f"Loading {hf_id} ...")
+    print(f"  Device: {device}  |  Dtype: {model_dtype}")
+
+    tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     # --- Policy model (LoRA) ---
     base_model = AutoModelForCausalLM.from_pretrained(
-        hf_name,
-        torch_dtype=torch.float32,
+        hf_id,
+        torch_dtype=model_dtype,
         trust_remote_code=True,
     )
+    base_model.to(device)
     lora_cfg = LoraConfig(
         r=GRPO_CONFIG["lora_r"],
         lora_alpha=GRPO_CONFIG["lora_alpha"],
@@ -215,19 +233,26 @@ def load_models(model_key: str):
     )
     policy_model = get_peft_model(base_model, lora_cfg)
     policy_model.train()
+
+    # Enable gradient checkpointing if configured (saves VRAM)
+    if GRPO_CONFIG.get("gradient_checkpointing"):
+        policy_model.gradient_checkpointing_enable()
+        print("  Gradient checkpointing: enabled")
+
     print(f"  Trainable params: {policy_model.print_trainable_parameters()}")
 
     # --- Reference model (frozen, no LoRA) ---
     ref_model = AutoModelForCausalLM.from_pretrained(
-        hf_name,
-        torch_dtype=torch.float32,
+        hf_id,
+        torch_dtype=model_dtype,
         trust_remote_code=True,
     )
+    ref_model.to(device)
     ref_model.eval()
     for param in ref_model.parameters():
         param.requires_grad = False
 
-    return tokenizer, policy_model, ref_model, model_cfg
+    return tokenizer, policy_model, ref_model, model_cfg, device
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +265,7 @@ def generate_completion(
     prompt_text: str,
     temperature: float,
     max_new_tokens: int,
+    device: torch.device = None,
 ) -> tuple[str, torch.Tensor, int]:
     """
     Generate a single completion from the policy model.
@@ -248,8 +274,10 @@ def generate_completion(
         (decoded_completion, full_input_ids, prompt_length)
         full_input_ids is (1, prompt_len + completion_len).
     """
+    if device is None:
+        device = next(policy_model.parameters()).device
     inputs = tokenizer(prompt_text, return_tensors="pt")
-    prompt_ids = inputs["input_ids"]
+    prompt_ids = inputs["input_ids"].to(device)
     prompt_length = prompt_ids.shape[1]
 
     with torch.no_grad():
@@ -278,6 +306,7 @@ def grpo_update(
     completions_data: list[dict],
     normalized_rewards: list[float],
     kl_coeff: float,
+    device: torch.device = None,
 ) -> float:
     """
     Perform one GRPO policy gradient step over a group of completions.
@@ -289,11 +318,14 @@ def grpo_update(
     Returns:
         The scalar loss value.
     """
+    if device is None:
+        device = next(policy_model.parameters()).device
+
     policy_model.train()
-    total_loss = torch.tensor(0.0)
+    total_loss = torch.tensor(0.0, device=device)
 
     for comp, reward in zip(completions_data, normalized_rewards):
-        input_ids = comp["input_ids"]
+        input_ids = comp["input_ids"].to(device)
         prompt_len = comp["prompt_length"]
 
         if input_ids.shape[1] <= prompt_len:
@@ -301,7 +333,8 @@ def grpo_update(
             continue
 
         # Policy log-probs (need gradients here)
-        outputs = policy_model(input_ids)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            outputs = policy_model(input_ids)
         logits = outputs.logits
         log_probs = torch.log_softmax(logits, dim=-1)
 
@@ -311,7 +344,7 @@ def grpo_update(
         policy_lp = token_lp.sum()
 
         # Reference log-probs (no gradient)
-        ref_lp = compute_log_probs(ref_model, input_ids, prompt_len)
+        ref_lp = compute_log_probs(ref_model, input_ids, prompt_len, device=device)
 
         # KL divergence for this completion: sum(policy_lp - ref_lp)
         kl = policy_lp - ref_lp
@@ -344,7 +377,7 @@ def train(args: argparse.Namespace) -> None:
         print(f"Unknown model '{args.model}'. Available: {list(MODELS.keys())}")
         sys.exit(1)
 
-    tokenizer, policy_model, ref_model, model_cfg = load_models(args.model)
+    tokenizer, policy_model, ref_model, model_cfg, device = load_models(args.model)
 
     optimizer = AdamW(
         policy_model.parameters(),
@@ -397,6 +430,7 @@ def train(args: argparse.Namespace) -> None:
             try:
                 completion_text, full_ids, prompt_len = generate_completion(
                     policy_model, tokenizer, prompt_text, temperature, max_new_tokens,
+                    device=device,
                 )
             except (MemoryError, torch.cuda.OutOfMemoryError, RuntimeError) as e:
                 print(f" OOM/error: {e}")
@@ -436,6 +470,7 @@ def train(args: argparse.Namespace) -> None:
             loss = grpo_update(
                 policy_model, ref_model, optimizer,
                 valid_comps, valid_rewards, kl_coeff,
+                device=device,
             )
             print(f"  Loss: {loss:.6f}")
         else:
@@ -488,6 +523,10 @@ def train(args: argparse.Namespace) -> None:
             f"| Rewards: {[round(r, 3) for r in normalized_rewards]} "
             f"| Avg: {avg:.2f}ms | Best: {best_score:.2f}ms"
         )
+
+        # Free GPU memory between iterations to prevent OOM
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     # Final summary
     print(f"\n{'='*60}")
