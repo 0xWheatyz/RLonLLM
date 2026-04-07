@@ -16,7 +16,7 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    command: ["python", "grpo_train.py", "--model", "${MODEL_NAME:-qwen-1.5b}"]
+    command: python grpo_train.py --model ${MODEL_NAME:-qwen-1.5b}
 
 volumes:
   huggingface_cache:
