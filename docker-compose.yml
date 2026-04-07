@@ -1,31 +1,4 @@
 services:
-  ollama:
-    build: 
-      context: ./ollama
-      dockerfile: Dockerfile
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  rl-trainer:
-    build:
-      context: .
-      dockerfile: RL/Dockerfile
-    environment:
-      - OLLAMA_HOST=http://ollama:11434
-      - RESULTS_DIR=/app/results
-    depends_on:
-      ollama:
-        condition: service_healthy
-    volumes:
-      - ./results:/app/results
-
   grpo-trainer:
     build:
       context: .
@@ -38,10 +11,12 @@ services:
       - huggingface_cache:/root/.cache/huggingface
     deploy:
       resources:
-        limits:
-          memory: 48G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     command: ["python", "grpo_train.py", "--model", "${MODEL_NAME:-qwen-1.5b}"]
 
 volumes:
-  ollama_data:
   huggingface_cache:

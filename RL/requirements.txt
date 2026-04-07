@@ -1,5 +1,8 @@
+# NOTE: torch should be installed separately with CUDA support, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# The Dockerfile handles this automatically.
+
 numpy
-requests
 astunparse
 torch>=2.1.0
 transformers>=4.40.0
